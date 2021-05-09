@@ -1,0 +1,321 @@
+---
+title: "Tweet_Prediction"
+author: "John Cooper"
+date: "4/2/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+## Instructions
+This is a summary output of the code in R Markdown which was also submitted
+To Run the included RMD File, R studio is required. Rstudio Cloud is not recommended (it's slow) the desktop version is much faster. I could replicate this in python but I have much more experience in R, and my python skills are still a little amateur (working hard to remedy). To load the data, place the raw csv file in your working directory and run all code chunks and optionally knit to pdf (this will replicate this document)
+
+
+# Summary: 
+I have extensive training in several aspects of NLP including prediction which really came in handy with this. I was suspicious of over-fitting but after comparing results from training &  testing, then shuffling the data and re-sampling, I'm still getting pretty much the same results. I'm confident that my model will perform well on the non-labeled data. 
+
+- 
+- Both Test and Training data results show a 99% accuracy, consistent outcomes are a good sign. 
+- Time to complete is under 60 seconds. (Installing packages may extend this time)
+- Advanced pre processing (key to great outcome)
+- LSA
+- K-Fold Cross Validation
+- Tokenize
+- Clean and Truncate text
+- TFIDF
+- svmLinear (othere tested, this was the best) 
+- Large (30%) sample data used to validate results
+
+
+# Sources: 
+I have extensive training in NLP which i relied on heavily. I also used information from the following.
+Certain chunks of code I developed previously for a personal NLP project, this made development a little easier. 
+
+https://dataaspirant.com/support-vector-machine-classifier-implementation-r-caret-package/
+https://seantrott.github.io/binary_classification_R/
+https://stackoverflow.com/questions/4090169/elegant-way-to-check-for-missing-packages-and-install-them
+https://cran.r-project.org/web/packages/caret/caret.pdf
+https://cran.r-project.org/web/packages/quanteda/quanteda.pdf
+
+## Install and Load Packages if required
+```{r, echo=TRUE, results="hide", warning = FALSE, message = FALSE}
+# Time the code execution
+start.time <- Sys.time()
+
+# if required, install and load each package
+if (!require('tidyverse')) install.packages('tidyverse'); library('tidyverse')
+if (!require('e1071')) install.packages('e1071'); library('e1071')
+if (!require('caret')) install.packages('caret'); library('caret')
+if (!require('quanteda')) install.packages('quanteda'); library('quanteda')
+if (!require('irlba')) install.packages('irlba'); library('irlba')
+if (!require('randomForest')) install.packages('randomForest'); library('randomForest')
+if (!require('doSNOW')) install.packages('doSNOW'); library('doSNOW')
+if (!require('kernlab')) install.packages('kernlab'); library('kernlab')
+```
+
+## Load data from Working Directory
+```{r, echo=TRUE, results="hide", warning = FALSE, message = FALSE}
+# after manually placing the data in your working directory, Load the CSV 
+bos_b_twts_raw <- read_csv("boston_bombing_tweets.csv") #if error, add data to WD
+
+```
+
+## Turn label data into categorical values
+```{r, echo=TRUE, results="hide", warning = FALSE, message = FALSE}
+# turn the binary responses into a categorical value (factor)
+bos_b_twts_raw$label <- as.factor(bos_b_twts_raw$label)
+
+```
+
+
+## Filter for labeled data, split into train/test data (70/30)
+```{r, echo=TRUE, results="hide", warning = FALSE, message = FALSE}
+# Filter for labeled data only
+bos_b_twts_filt <- bos_b_twts_raw %>% filter(label != "NA")
+
+# set seed for a consistent output
+set.seed(12345)
+
+# split labeled data into testing and training (70/30)
+bos_b_twts_record <- createDataPartition(bos_b_twts_filt$label, times = 1,
+                                         p = 0.7, list = FALSE)
+bos_b_twts_train <- bos_b_twts_filt[bos_b_twts_record,]
+bos_b_twts_test <- bos_b_twts_filt[-bos_b_twts_record,]
+```
+
+## Tokenize, clean, stem, set text frequency requirements and prep LSA and SVD
+Terms: 
+dfm: Document Feature Matrix
+tfidf: Term frequency - inverse document frequency: This is a measure used to
+identify which words are important. 
+lsa: latent Samentic ANalysis: 
+svd: 
+```{r, echo=TRUE, results="hide", warning = FALSE, message = FALSE}
+# Use quanteda to preprocess the text into tokens
+bos_b_twts_train_token2 <- tokens(bos_b_twts_train$text, 
+                                  what = "word",
+                                  remove_numbers = TRUE, 
+                                  remove_punct = TRUE,
+                                  remove_symbols = TRUE, 
+                                  split_hyphens = TRUE) %>%
+  tokens_tolower()
+
+# Further clean the text by removing stop words and stemming words
+# Only use words with a frequency of 1.5% across 2+ tweets
+bos_b_twts_train_dfm<-bos_b_twts_train_token2 %>%
+  tokens_remove(stopwords(source = "smart")) %>%
+  tokens_wordstem() %>%
+  dfm() %>%
+  dfm_trim( min_termfreq = round(nrow(bos_b_twts_train)*.02, 0), 
+            min_docfreq = 2) %>%
+  dfm_tfidf()
+
+#train_lsa
+# Latent Semantic Analysis - for dimension reduction (very important step)
+train_lsa <- irlba(t(bos_b_twts_train_dfm), 
+                   nv = ncol(bos_b_twts_train_dfm)-1, maxit = 300) # this creates 
+# a trunkated file  aprox 50 x 300 
+train_svd <- data.frame(Label = bos_b_twts_train$label, 
+                        ReviewLength= nchar(bos_b_twts_train$text),
+                        train_lsa$v)
+
+```
+# Lets preview what we have created
+
+```{r, echo=TRUE}
+head(train_svd)
+```
+## Prep the K-Fold cross validation
+```{r, echo=TRUE, results="hide", warning = FALSE, message = FALSE}
+# K Fold Cross Validation using the package caret
+# Create folds for 10-fold cross validation
+set.seed(48743)
+cv.folds <- createMultiFolds(train_svd$Label, k = 10, times = 2)
+
+# basically this will create 20 random samples
+cv.cntrl <- trainControl(method = "repeatedcv", number = 10,
+                         repeats = 2, index = cv.folds)
+```
+
+## Speed up processing, This reduces run time from 30+ minutes to 2 minutes. 
+Note: this does not benefit if ran on Rstudio Cloud. Only speeds up 
+processing if ran from desktop version of Rstudio, or on a VM with multiple cores. 
+```{r, echo=TRUE}
+# Speed up processing in order to scale
+# Create a cluster to work on 3 logical cores
+# essentially 3 instances of Rstudio for processing
+cl <- makeCluster(3, type = "SOCK")
+
+# register the instance for faster processing
+registerDoSNOW(cl) 
+```
+
+
+## Train the svmRadial Model using the previously defined Training data, then 
+## end the cluster
+```{r, echo=TRUE, results="hide", warning = FALSE, message = FALSE}
+# set seed for consistency
+set.seed(12345)
+
+# Train the Training Data
+SVM_RB <- train(
+  Label ~., data = train_svd, method = "svmLinear",
+  trControl = cv.cntrl,
+  preProcess = c("center","scale"))
+
+# Processing is done, stop cluster.
+on.exit(stopCluster(cl))
+
+```
+
+## Review the prediction results based on training data. 
+This output will be compared to the test data output. A large discrepancy would 
+suggest overfilling, or issues relating to the samples taken. 
+```{r, echo=TRUE}
+# Review Results from Training data
+preds <- predict(SVM_RB, train_svd)
+confusionMatrix(preds, train_svd$Label)
+```
+Above are fantastic results, proceed cautiously, watch for signs of over fitting. 
+
+
+# Apply the Model to the Testing Data
+30% of the labeled data was with held, Now I'm going to use that data to test 
+the model for accuracy. 
+
+
+## Tokenize and clean the testing data as we did  with the training data
+```{r, echo=TRUE}
+bos_b_twts_test_token <- tokens(bos_b_twts_test$text, what = "word",
+                                remove_numbers = TRUE, remove_punct = TRUE,
+                                remove_symbols = TRUE, split_hyphens = TRUE) %>%
+  tokens_tolower()
+
+# Further clean the text by removing stop words and stemming
+# Only use words with a frequency of 2.5% across 2+ tweets
+bos_b_twts_test_dfm<-bos_b_twts_test_token %>%
+  tokens_remove(stopwords(source = "smart")) %>%
+  tokens_wordstem() %>%
+  dfm() %>%
+  dfm_trim( min_termfreq = round(nrow(bos_b_twts_test)*.02, 0), 
+            min_docfreq = 2) %>%
+  dfm_tfidf()
+```
+
+## Match data formats (testing vs training)
+```{r, echo=TRUE, results="hide", warning = FALSE, message = FALSE}
+# Use quanteda to make sure training and testing data have exact same format
+bos_b_twts_test_dfm <- dfm_select(bos_b_twts_test_dfm, 
+                                  pattern = bos_b_twts_train_dfm,
+                                  selection = "keep")
+bos_b_twts_test_matrix <- as.matrix(bos_b_twts_test_dfm)
+```
+## Prep the data further
+```{r, echo=TRUE}
+# taking the transpose of the singular matrix
+sigma.inverse <- 1 / train_lsa$d
+
+# transpose of the term matrix
+u.transpose <- t(train_lsa$u)
+test_svd <- t(sigma.inverse * u.transpose %*% t(bos_b_twts_test_dfm))
+test_svd<-as.matrix(test_svd)
+
+# Build the test data frame to feed into our trained machine learning model 
+# for predictions.
+test_svd <- data.frame(Label = bos_b_twts_test$label, 
+                       ReviewLength= nchar(bos_b_twts_test$text), 
+                       test_svd)
+
+```
+
+## Make predictions and output a confusion matrix and measures to assess the 
+## quality of the models performance on the testing data
+```{r, echo=TRUE}
+# Make predictions on the test data set using our trained SVM.
+preds <- predict(SVM_RB, test_svd)
+confusionMatrix(preds, test_svd$Label)
+```
+
+Consistent accuracy across training and test indicates the model is performing 
+well and is not over-fit. Also, experimented with different sample sizes and 
+sampling methods which all produced similar results. I am comfortable that the
+model is not over fit. 
+
+
+# Apply the model to the entire data set in preparation for submission. 
+
+
+## the original data source was saved as raw, we will now prep that data as we 
+## already have with the training and testing data
+## and applying our predictions
+```{r, echo=TRUE}
+# the original data source was saved as raw, we will now prep that data
+# and applying our predictions
+bos_b_twts_apply_token <- tokens(bos_b_twts_raw$text, what = "word",
+                                 remove_numbers = TRUE, 
+                                 remove_punct = TRUE,
+                                 remove_symbols = TRUE, 
+                                 split_hyphens = TRUE) %>% 
+  tokens_tolower()
+
+# Further clean the text by removing stop words and stemming
+# Only use words with a frequency of 2.5% across 2+ tweets
+bos_b_twts_apply_dfm <- bos_b_twts_apply_token %>%
+  tokens_remove(stopwords(source = "smart")) %>%
+  tokens_wordstem() %>%
+  dfm() %>%
+  dfm_trim(min_termfreq = round(nrow(bos_b_twts_raw)*.02, 0), 
+           min_docfreq = 2) %>%
+  dfm_tfidf()
+```
+
+## Use quanteda to make sure training and raw data have exact same format as 
+## the training set
+```{r, echo=TRUE, warning = FALSE, message = FALSE}
+# Use quanteda to make sure training and raw data have exact same format
+bos_b_twts_apply_dfm <- dfm_select(bos_b_twts_apply_dfm, 
+                                   pattern = bos_b_twts_train_dfm,
+                                   selection = "keep")
+bos_b_twts_apply_matrix <- as.matrix(bos_b_twts_apply_dfm)
+
+```
+## Prepare the data further
+```{r, echo=TRUE}
+
+# taking the transpose of the singular matrix
+sigma.inverse <- 1 / train_lsa$d 
+
+# transpose of the term matrix
+u.transpose <- t(train_lsa$u)
+apply_svd <- t(sigma.inverse * u.transpose %*% t(bos_b_twts_apply_dfm))
+apply_svd<-as.matrix(apply_svd)
+
+# Lastly, we can build the apply data frame to feed into our trained machine 
+# learning model for predictions.
+apply_svd <- data.frame(Label = bos_b_twts_raw$label, 
+                        ReviewLength= nchar(bos_b_twts_raw$text), 
+                        apply_svd)
+
+```
+
+## Make Predictions, apply to the original data as a new column called "preds"  
+```{r, echo=TRUE}
+# Now we can make predictions on the apply data set using our trained SVM.
+preds <- predict(SVM_RB, apply_svd)
+bos_b_twts_raw$preds <- preds
+```
+
+## Write to a csv with a time stamp, and output the total time the code took to execute
+```{r, echo=TRUE}
+
+# Get the current time
+systime <- format(Sys.time(),"%Y-%m-%d-%H-%M-%S")
+
+# write the original tweets plus the prediction to a csv with a time stamp
+write.csv(data.frame(bos_b_twts_raw), file = paste("Boston_B_Tweet_Predictions_", systime, ".csv", sep = ""), row.names = FALSE)
+
+# Time it took to run the code from beginning to end
+# Note that the packages where pre-loaded
+total.time <- Sys.time() - start.time
+total.time
+```
